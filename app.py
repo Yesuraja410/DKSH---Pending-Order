@@ -46,13 +46,20 @@ SELLER_EMAILS = {
     ]
 }
 
-# Column Synonyms for Automatic Mapping
+# Column Synonyms for Automatic Mapping.
+# NOTE: Lists are ordered most-specific-first — auto_map_headers() tries every
+# synonym across ALL headers before moving to the next (lower-priority) synonym.
+# This matters because real DKSH exports often have several similarly-named
+# columns (e.g. order_status / payment_status / item_status / sla_status, or
+# order_id / order_number) — a generic word like "status" must never be allowed
+# to win over the exact "payment_status" column just because it appears first
+# in the file.
 COLUMN_SYNONYMS = {
-    "orderNumber": ['order number', 'order no', 'order id', 'order no.', 'orderno', 'order_number', 'order_id', 'order ID #', 'document number', 'so number'],
-    "paymentStatus": ['payment status', 'payment_status', 'status', 'order status', 'paymentstatus', 'pay status'],
+    "orderNumber": ['order number', 'order_number', 'order no', 'order no.', 'orderno', 'document number', 'so number', 'order id', 'order_id', 'order ID #'],
+    "paymentStatus": ['payment status', 'payment_status', 'paymentstatus', 'pay status', 'pay_status'],
     "paymentMethod": ['payment method', 'payment_method', 'payment methods', 'payment_methods', 'payment mode', 'paymentmode', 'paymenttype', 'payment type', 'pay method'],
-    "nickname": ['nickname', 'seller nickname', 'seller id', 'store nickname', 'store', 'shop', 'seller_nickname', 'nickname seller', 'brand', 'channel'],
-    "orderDate": ['order date', 'date', 'created date', 'order_date', 'orderdate', 'createdtime', 'created time', 'date created', 'order creation date', 'ordered date', 'ordered_date']
+    "nickname": ['nickname', 'seller nickname', 'store nickname', 'seller_nickname', 'nickname seller', 'seller id', 'store', 'shop', 'brand', 'channel'],
+    "orderDate": ['ordered date', 'ordered_date', 'order date', 'order_date', 'orderdate', 'order creation date', 'created date', 'date created', 'createdtime', 'created time', 'date']
 }
 
 # Helper Functions
@@ -98,20 +105,38 @@ def get_display_date(date_str):
     return "Unknown Date"
 
 def auto_map_headers(headers):
+    """Map each logical field (orderNumber, paymentStatus, ...) to the best
+    matching real column name.
+
+    Matching is done by SYNONYM PRIORITY, not by column order: for a given
+    field, every synonym in the list is tried (in order) across all headers
+    for an exact match before we ever fall back to the next, less specific
+    synonym or to a loose "contains" match. This avoids a common bug where a
+    generic/ambiguous column (e.g. "order_status") that happens to appear
+    earlier in the sheet gets mistakenly picked over the real, exact-match
+    column (e.g. "payment_status") purely because of column ordering.
+    """
     mapping = {k: "" for k in COLUMN_SYNONYMS}
     normalized_headers = [(h, normalize_val(h)) for h in headers]
+
     for key, synonyms in COLUMN_SYNONYMS.items():
-        # Exact/contains check
-        for orig, norm in normalized_headers:
-            if any(syn == norm or syn in norm for syn in synonyms):
-                mapping[key] = orig
+        # 1) Exact match, tried in synonym priority order (most specific first)
+        for syn in synonyms:
+            match = next((orig for orig, norm in normalized_headers if norm == syn), None)
+            if match:
+                mapping[key] = match
                 break
-        if not mapping[key]:
-            # Partial match fallback
-            for orig, norm in normalized_headers:
-                if any(norm in syn and len(norm) > 2 for syn in synonyms):
-                    mapping[key] = orig
-                    break
+        if mapping[key]:
+            continue
+        # 2) Fallback: loose contains-match, also tried in priority order.
+        # Skip very short/generic tokens here to reduce false positives.
+        for syn in synonyms:
+            if len(syn) <= 3:
+                continue
+            match = next((orig for orig, norm in normalized_headers if syn in norm or norm in syn), None)
+            if match:
+                mapping[key] = match
+                break
     return mapping
 
 def get_google_sheet_csv_url(share_url):
@@ -138,6 +163,18 @@ smtp_defaults = local_config
 # Main Title UI
 st.title("📧 DKSH Pending Order Report Automator & Emailer")
 st.write("Process your Pending orders (NOT_INITIATED status), aggregate a formatted 2D Pivot grid, and email reports directly to your sellers.")
+
+# Account Selection - placed at the very top, before any data is uploaded,
+# so the chosen account drives the output file name / email recipients from
+# the start rather than depending on what's auto-detected inside the file.
+st.markdown("### 🎯 Select Account")
+selected_merchant = st.selectbox(
+    "Which account is this report for?",
+    ["All Accounts"] + list(ACCOUNT_IDS),
+    index=0,
+    help="Choose AAFHU or AAFHB before uploading your data. This drives the output file name, email recipients, and (if the uploaded file has a merchant/account column) row filtering."
+)
+st.markdown("---")
 
 # Layout: Split Config and Data
 col_left, col_right = st.columns([1, 2.2])
@@ -268,8 +305,9 @@ with col_right:
             "orderDate": col_map_date
         }
         
-        # Selectbox filter for Account ID (AAFHU / AAFHB)
-        # Try common column names first
+        # Detect the Account/Merchant ID column in the uploaded data so we can
+        # filter rows to match the account chosen at the top of the page.
+        # (The account itself is already selected above, before upload.)
         ACCOUNT_COL_CANDIDATES = [
             'merchant_id', 'merchant', 'account_id', 'account', 'seller_id',
             'seller_account', 'account_no', 'account number', 'merchantid',
@@ -289,14 +327,9 @@ with col_right:
                     merchant_col = c
                     break
 
-        # Account selection - always offer AAFHU / AAFHB explicitly regardless of
-        # what other values exist in the detected column
-        if merchant_col is not None:
-            merchant_options = ["All Accounts"] + list(ACCOUNT_IDS)
-            selected_merchant = st.selectbox("🎯 Filter Account (AAFHU / AAFHB)", merchant_options, index=0)
-        else:
-            st.warning("⚠️ Could not find an Account/Merchant ID column containing AAFHU/AAFHB in the dataset. All data will be processed.")
-            selected_merchant = "All Accounts"
+        st.info(f"📬 Processing report for account: **{selected_merchant}**")
+        if selected_merchant != "All Accounts" and merchant_col is None:
+            st.warning(f"⚠️ Could not find an Account/Merchant ID column containing '{selected_merchant}' in the dataset. All rows will be processed without account filtering.")
 
         # Core Processor Trigger
         # Run exclusion filter and deduplication
