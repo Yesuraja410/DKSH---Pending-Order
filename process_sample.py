@@ -27,13 +27,13 @@ def normalize_val(val):
     s = s.replace('[', '').replace(']', '').replace('_', ' ').replace('-', ' ')
     return " ".join(s.split())
 
-# 1. Exclude orders: Payment Status is NOT_INITIATED or Pending and Payment Method is not COD
+# 1. Exclude orders: Payment Status is NOT_INITIATED and Payment Method is not COD
 filtered_rows = []
 for idx, row in df.iterrows():
     status = normalize_val(row[col_status])
     method = normalize_val(row[col_method])
-    is_excluded_status = status == 'not initiated' or status == 'pending'
-    is_cod = 'cod' in method or ('cash' in method and 'delivery' in method)
+    is_excluded_status = status == 'not initiated'
+    is_cod = (method == 'cod' or 'cod' in method or ('cash' in method and 'delivery' in method))
     if not (is_excluded_status and not is_cod):
         filtered_rows.append(row)
 
@@ -93,13 +93,13 @@ formatted_today = f"{today.day}{day_suffix} {today.strftime('%b')} -{today.year}
 # Build Workbook
 wb = openpyxl.Workbook()
 
-# Sheet 1: Pivot Summary
+# Sheet 1: Summary (pivot)
 ws_pivot = wb.active
-ws_pivot.title = "Pivot Summary"
+ws_pivot.title = "Summary"
 ws_pivot.views.sheetView[0].showGridLines = True
 
-# Sheet 2: Cleaned Details (holds all original columns and rows, no duplicates removed here)
-ws_details = wb.create_sheet(title="Cleaned Details")
+# Sheet 2: Data (holds all original columns and rows, no duplicates removed here)
+ws_details = wb.create_sheet(title="Data")
 ws_details.views.sheetView[0].showGridLines = True
 
 # Styling helpers (mockup aligned)
