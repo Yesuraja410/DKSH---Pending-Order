@@ -23,6 +23,9 @@ st.set_page_config(
     layout="wide",
 )
 
+# Account IDs supported for filtering
+ACCOUNT_IDS = ["AAFHU", "AAFHB"]
+
 # Constants for Seller Emails
 SELLER_EMAILS = {
     "AAFHU": [
@@ -265,42 +268,55 @@ with col_right:
             "orderDate": col_map_date
         }
         
-        # Selectbox filter for Merchant ID
-        merchant_col = 'merchant_id'
-        if merchant_col not in df_raw.columns:
-            # Fallback if merchant_id is named differently (e.g. lowercase)
+        # Selectbox filter for Account ID (AAFHU / AAFHB)
+        # Try common column names first
+        ACCOUNT_COL_CANDIDATES = [
+            'merchant_id', 'merchant', 'account_id', 'account', 'seller_id',
+            'seller_account', 'account_no', 'account number', 'merchantid',
+            'accountid', 'account name', 'account_name'
+        ]
+        merchant_col = None
+        for c in df_raw.columns:
+            if c.strip().lower() in ACCOUNT_COL_CANDIDATES:
+                merchant_col = c
+                break
+
+        # Fallback: scan every column for one that actually contains AAFHU/AAFHB values
+        if merchant_col is None:
             for c in df_raw.columns:
-                if c.lower() == 'merchant_id' or c.lower() == 'merchant':
+                sample_vals = df_raw[c].astype(str).str.upper()
+                if sample_vals.str.contains('AAFHU|AAFHB', regex=True, na=False).any():
                     merchant_col = c
                     break
-        
-        # Account selection
-        if merchant_col in df_raw.columns:
-            merchant_options = ["All Accounts"] + sorted(list(df_raw[merchant_col].unique()))
-            selected_merchant = st.selectbox("🎯 Filter Merchant Account", merchant_options, index=0)
+
+        # Account selection - always offer AAFHU / AAFHB explicitly regardless of
+        # what other values exist in the detected column
+        if merchant_col is not None:
+            merchant_options = ["All Accounts"] + list(ACCOUNT_IDS)
+            selected_merchant = st.selectbox("🎯 Filter Account (AAFHU / AAFHB)", merchant_options, index=0)
         else:
-            st.warning("⚠️ Column 'merchant_id' not found in dataset. All data will be processed.")
+            st.warning("⚠️ Could not find an Account/Merchant ID column containing AAFHU/AAFHB in the dataset. All data will be processed.")
             selected_merchant = "All Accounts"
-            
+
         # Core Processor Trigger
         # Run exclusion filter and deduplication
         with st.spinner("Processing & Formatting Report..."):
             # Exclude orders
             df_merch = df_raw.copy()
-            if selected_merchant != "All Accounts" and merchant_col in df_raw.columns:
-                df_merch = df_raw[df_raw[merchant_col].str.upper() == selected_merchant.upper()]
-                
+            if selected_merchant != "All Accounts" and merchant_col is not None:
+                df_merch = df_raw[df_raw[merchant_col].astype(str).str.upper().str.contains(selected_merchant.upper(), na=False)]
+
             filtered_rows = []
             excluded_count = 0
-            
+
             for idx, row in df_merch.iterrows():
                 status = normalize_val(row[mapping["paymentStatus"]]) if mapping["paymentStatus"] in df_merch.columns else ""
                 method = normalize_val(row[mapping["paymentMethod"]]) if mapping["paymentMethod"] in df_merch.columns else ""
-                
-                # Exclude if NOT_INITIATED or PENDING and NOT COD
-                is_excluded_status = (status == 'not initiated' or status == 'pending')
-                is_cod = 'cod' in method or ('cash' in method and 'delivery' in method)
-                
+
+                # Exclude if payment_status is NOT_INITIATED and payment_method is NOT COD
+                is_excluded_status = (status == 'not initiated')
+                is_cod = (method == 'cod' or 'cod' in method or ('cash' in method and 'delivery' in method))
+
                 if is_excluded_status and not is_cod:
                     excluded_count += 1
                 else:
@@ -344,10 +360,10 @@ with col_right:
                 # Build Styled Workbook Excel Report
                 wb = openpyxl.Workbook()
                 ws_pivot = wb.active
-                ws_pivot.title = "Pivot Summary"
+                ws_pivot.title = "Summary"
                 ws_pivot.views.sheetView[0].showGridLines = True
-                
-                ws_details = wb.create_sheet(title="Cleaned Details")
+
+                ws_details = wb.create_sheet(title="Data")
                 ws_details.views.sheetView[0].showGridLines = True
                 
                 # Layout formatting openpyxl styles
