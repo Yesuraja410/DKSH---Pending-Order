@@ -148,6 +148,16 @@ def get_google_sheet_csv_url(share_url):
     gid = gid_match.group(1) if gid_match else "0"
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
+# A real browser User-Agent header. Google's export endpoint sometimes blocks
+# or blanks the response for default python-requests / bot-like user agents
+# even when a sheet is shared publicly.
+GOOGLE_SHEET_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
 # SMTP Load/Save Configuration
 local_config = {}
 try:
@@ -237,21 +247,41 @@ with col_right:
     
     if import_type == "Google Sheets Link":
         sheet_url = st.text_input("Paste Public Google Sheet URL", value="", placeholder="https://docs.google.com/spreadsheets/d/...")
+        st.caption("Tip: the URL must point to the exact tab you want (open that tab first so the `gid=` in the address bar matches it). The spreadsheet must be shared as **Anyone with the link → Viewer** (Share button in Google Sheets) — 'Restricted' sharing will fail even if you're logged in yourself.")
         if sheet_url:
             with st.spinner("Fetching Google Sheet..."):
                 try:
                     csv_url = get_google_sheet_csv_url(sheet_url)
                     if not csv_url:
-                        st.error("Invalid Google Sheet URL format.")
+                        st.error("Invalid Google Sheet URL format. Expected something like https://docs.google.com/spreadsheets/d/<ID>/edit#gid=<TAB_ID>")
                     else:
-                        response = requests.get(csv_url, timeout=15)
-                        if response.status_code == 200:
+                        response = requests.get(csv_url, headers=GOOGLE_SHEET_REQUEST_HEADERS, timeout=20, allow_redirects=True)
+                        body = response.text.strip()
+                        content_type = response.headers.get("Content-Type", "").lower()
+
+                        if response.status_code != 200:
+                            st.error(f"Failed to fetch Google Sheet (HTTP {response.status_code}). Verify sharing permissions and that the link is correct.")
+                        elif not body:
+                            st.error(
+                                "Google Sheet returned no data (empty response). This almost always means the sheet "
+                                "is not publicly viewable. In Google Sheets, click **Share** → set **General access** "
+                                "to **'Anyone with the link'** (role: Viewer) → Done, then try again."
+                            )
+                        elif body.lstrip().lower().startswith("<") or "text/html" in content_type:
+                            st.error(
+                                "Google returned a sign-in / permission page instead of your data. Please set the "
+                                "sheet's sharing to **'Anyone with the link'** (Share button in Google Sheets), then try again. "
+                                "If it's already shared that way, double check the `gid=` in your URL matches the tab with your data."
+                            )
+                        else:
                             # Read raw CSV using text strings to avoid large ID scientific notation crashes
                             df_raw = pd.read_csv(io.StringIO(response.text), dtype=str).fillna('')
-                            file_name = "Google_Sheet_Data"
-                            st.success("✅ Successfully fetched Google Sheet data!")
-                        else:
-                            st.error(f"Failed to fetch GSheet (HTTP {response.status_code}). Verify sharing permissions.")
+                            if df_raw.empty or len(df_raw.columns) == 0:
+                                st.error("The fetched tab appears to be empty. Double-check the `gid=` in your URL points to the correct tab (the one with your order data).")
+                                df_raw = None
+                            else:
+                                file_name = "Google_Sheet_Data"
+                                st.success(f"✅ Successfully fetched Google Sheet data! ({len(df_raw)} rows, {len(df_raw.columns)} columns)")
                 except Exception as e:
                     st.error(f"Error loading Google Sheet: {e}")
     else:
